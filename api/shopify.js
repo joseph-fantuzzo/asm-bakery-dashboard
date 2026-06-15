@@ -1,31 +1,28 @@
-// /api/shopify.js — Shopify GraphQL proxy
-// Fetches the access token from Supabase (set during OAuth) or env var fallback.
-// Token never exposed to the browser.
+// /api/shopify.js — Shopify GraphQL proxy (CommonJS, no external deps)
+// Reads Shopify access token from Supabase REST API or env var fallback.
 
-import { createClient } from '@supabase/supabase-js';
-
-const SHOP           = process.env.SHOPIFY_STORE || 'asweetmorselco.myshopify.com';
-const SHOPIFY_URL    = `https://${SHOP}/admin/api/2026-04/graphql.json`;
-const SUPABASE_URL   = process.env.SUPABASE_URL || 'https://ytzpfhjcaesgylodaasw.supabase.co';
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
+const SHOP         = process.env.SHOPIFY_STORE || 'asweetmorselco.myshopify.com';
+const SHOPIFY_URL  = `https://${SHOP}/admin/api/2026-04/graphql.json`;
+const SB_URL       = process.env.SUPABASE_URL || 'https://ytzpfhjcaesgylodaasw.supabase.co';
+const SB_KEY       = process.env.SUPABASE_SERVICE_KEY;
 
 async function getAccessToken() {
-  // Try Supabase first (set via OAuth flow)
-  if (SUPABASE_SERVICE_KEY) {
+  // Try Supabase app_settings table first (populated via OAuth)
+  if (SB_KEY) {
     try {
-      const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
-      const { data } = await sb.from('app_settings')
-        .select('value').eq('key', 'shopify_access_token').single();
-      if (data?.value) return data.value;
-    } catch(e) {
-      console.warn('Supabase token fetch failed, trying env var:', e.message);
-    }
+      const r = await fetch(
+        `${SB_URL}/rest/v1/app_settings?key=eq.shopify_access_token&select=value&limit=1`,
+        { headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` } }
+      );
+      const rows = await r.json();
+      if (rows?.[0]?.value) return rows[0].value;
+    } catch(e) { console.warn('SB token fetch failed:', e.message); }
   }
-  // Fall back to env var (manually set static token)
+  // Fall back to env var static token
   return process.env.SHOPIFY_ACCESS_TOKEN || null;
 }
 
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -36,151 +33,85 @@ export default async function handler(req, res) {
     return res.status(401).json({ error: 'Shopify not connected — complete OAuth setup first' });
   }
 
-  const { action, orderId } = req.method === 'POST'
-    ? (req.body || {})
-    : (req.query || {});
+  const body   = req.method === 'POST' ? (req.body || {}) : {};
+  const query  = req.query || {};
+  const action  = body.action || query.action;
+  const orderId = body.orderId || query.orderId;
 
   try {
-    // ── GET OPEN / UNFULFILLED ORDERS ────────────────────────────────────────
+    // ── GET OPEN / UNFULFILLED ORDERS ───────────────────────────────────────
     if (!action || action === 'getOrders') {
-      const query = `{
-        orders(
-          first: 100,
-          query: "fulfillment_status:unshipped OR fulfillment_status:partial",
-          sortKey: CREATED_AT,
-          reverse: true
-        ) {
-          edges {
-            node {
-              id
-              name
-              displayFulfillmentStatus
-              createdAt
-              totalPriceSet { shopMoney { amount currencyCode } }
-              customer { firstName lastName email }
-              shippingAddress { address1 city province zip }
-              lineItems(first: 50) {
-                edges {
-                  node {
-                    id
-                    name
-                    quantity
-                    sku
-                    originalUnitPriceSet { shopMoney { amount } }
-                  }
-                }
-              }
-              note
-              tags
-            }
-          }
+      const gql = `{
+        orders(first:100, query:"fulfillment_status:unshipped OR fulfillment_status:partial", sortKey:CREATED_AT, reverse:true) {
+          edges { node {
+            id name displayFulfillmentStatus createdAt
+            totalPriceSet { shopMoney { amount currencyCode } }
+            customer { firstName lastName email }
+            lineItems(first:50) { edges { node { id name quantity sku originalUnitPriceSet { shopMoney { amount } } } } }
+            note tags
+          }}
         }
       }`;
 
-      const shopifyRes = await fetch(SHOPIFY_URL, {
+      const sr = await fetch(SHOPIFY_URL, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Shopify-Access-Token': token
-        },
-        body: JSON.stringify({ query })
+        headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': token },
+        body: JSON.stringify({ query: gql })
       });
 
-      if (!shopifyRes.ok) {
-        const txt = await shopifyRes.text();
-        return res.status(shopifyRes.status).json({ error: `Shopify error ${shopifyRes.status}`, detail: txt });
-      }
-
-      const data = await shopifyRes.json();
-      if (data.errors) {
-        return res.status(400).json({ error: 'GraphQL error', details: data.errors });
-      }
-      const orders = (data?.data?.orders?.edges || []).map(e => e.node);
-      return res.status(200).json({ orders });
+      if (!sr.ok) return res.status(sr.status).json({ error: `Shopify ${sr.status}`, detail: await sr.text() });
+      const data = await sr.json();
+      if (data.errors) return res.status(400).json({ error: 'GraphQL error', details: data.errors });
+      return res.status(200).json({ orders: (data?.data?.orders?.edges || []).map(e => e.node) });
     }
 
-    // ── FULFILL AN ORDER ─────────────────────────────────────────────────────
+    // ── FULFILL AN ORDER ────────────────────────────────────────────────────
     if (action === 'fulfillOrder') {
       if (!orderId) return res.status(400).json({ error: 'orderId required' });
 
-      // Step 1: Get open fulfillment order IDs
-      const getFOQuery = `{
-        order(id: "${orderId}") {
-          id
-          name
-          fulfillmentOrders(first: 10) {
-            edges {
-              node {
-                id
-                status
-                lineItems(first: 50) {
-                  edges { node { id remainingQuantity } }
-                }
-              }
-            }
-          }
-        }
-      }`;
-
-      const foRes = await fetch(SHOPIFY_URL, {
+      // Step 1: Get fulfillment orders
+      const foGql = `{ order(id:"${orderId}") { fulfillmentOrders(first:10) { edges { node { id status lineItems(first:50) { edges { node { id remainingQuantity } } } } } } } }`;
+      const foR = await fetch(SHOPIFY_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': token },
-        body: JSON.stringify({ query: getFOQuery })
+        body: JSON.stringify({ query: foGql })
       });
-      const foData = await foRes.json();
+      const foData = await foR.json();
+      const fos = (foData?.data?.order?.fulfillmentOrders?.edges || [])
+        .map(e => e.node).filter(fo => ['OPEN','IN_PROGRESS'].includes(fo.status));
 
-      const fulfillmentOrders = (foData?.data?.order?.fulfillmentOrders?.edges || [])
-        .map(e => e.node)
-        .filter(fo => ['OPEN', 'IN_PROGRESS'].includes(fo.status));
+      if (!fos.length) return res.status(200).json({ success: true, message: 'Already fulfilled' });
 
-      if (!fulfillmentOrders.length) {
-        return res.status(200).json({ success: true, message: 'Already fulfilled or no open fulfillment orders' });
-      }
-
-      // Step 2: Create fulfillment
-      const lineItemsByFulfillmentOrder = fulfillmentOrders.map(fo => ({
+      // Step 2: Fulfill
+      const lineItemsByFulfillmentOrder = fos.map(fo => ({
         fulfillmentOrderId: fo.id,
         fulfillmentOrderLineItems: fo.lineItems.edges
           .filter(e => e.node.remainingQuantity > 0)
           .map(e => ({ id: e.node.id, quantity: e.node.remainingQuantity }))
       }));
 
-      const fulfillMutation = `
-        mutation fulfillmentCreateV2($fulfillment: FulfillmentV2Input!) {
-          fulfillmentCreateV2(fulfillment: $fulfillment) {
-            fulfillment { id status }
-            userErrors { field message }
-          }
+      const mutation = `mutation fulfillmentCreateV2($f: FulfillmentV2Input!) {
+        fulfillmentCreateV2(fulfillment: $f) {
+          fulfillment { id status }
+          userErrors { field message }
         }
-      `;
+      }`;
 
-      const fulfillRes = await fetch(SHOPIFY_URL, {
+      const fR = await fetch(SHOPIFY_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Shopify-Access-Token': token },
-        body: JSON.stringify({
-          query: fulfillMutation,
-          variables: {
-            fulfillment: { notifyCustomer: true, lineItemsByFulfillmentOrder }
-          }
-        })
+        body: JSON.stringify({ query: mutation, variables: { f: { notifyCustomer: true, lineItemsByFulfillmentOrder } } })
       });
-
-      const fulfillData = await fulfillRes.json();
-      const userErrors = fulfillData?.data?.fulfillmentCreateV2?.userErrors || [];
-      if (userErrors.length) {
-        return res.status(400).json({ error: 'Shopify fulfillment error', details: userErrors });
-      }
-
-      return res.status(200).json({
-        success: true,
-        fulfillment: fulfillData?.data?.fulfillmentCreateV2?.fulfillment
-      });
+      const fData = await fR.json();
+      const errs = fData?.data?.fulfillmentCreateV2?.userErrors || [];
+      if (errs.length) return res.status(400).json({ error: 'Fulfillment error', details: errs });
+      return res.status(200).json({ success: true, fulfillment: fData?.data?.fulfillmentCreateV2?.fulfillment });
     }
 
     return res.status(400).json({ error: `Unknown action: ${action}` });
 
-  } catch (err) {
+  } catch(err) {
     console.error('Shopify proxy error:', err);
     return res.status(500).json({ error: err.message });
   }
-}
+};
