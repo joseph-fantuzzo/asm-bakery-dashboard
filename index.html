@@ -791,6 +791,7 @@ input[type=number] {
       </div>
       <div class="week-grid-wrap"><div class="week-grid" id="week-grid"></div></div>
       <div class="card">
+        <div id="sched-order-coverage" style="margin-bottom:12px"></div>
         <div class="card-title">Week summary — batches scheduled</div>
         <div style="overflow-x:auto;-webkit-overflow-scrolling:touch"><table class="tbl" style="min-width:900px">
           <thead><tr><th>Product</th><th>Mon</th><th>Tue</th><th>Wed</th><th>Thu</th><th>Fri</th><th>Sat</th><th>Sun</th><th>Total batches</th><th>Total dozens</th><th>Labor cost</th><th>Gross profit</th><th></th></tr></thead>
@@ -817,6 +818,9 @@ input[type=number] {
         <p style="font-size:13px;color:var(--brown-mid)">Changes are saved automatically and apply across all tabs. Stored locally in your browser.</p>
         <div style="display:flex;gap:8px">
           <button class="btn btn-sm" onclick="resetSettings()" style="color:var(--red);border-color:var(--red)">Reset to defaults</button>
+          <button class="btn btn-sm" onclick="exportBackup()" style="color:var(--brown-mid);border-color:var(--brown-mid)">⬇ Export backup</button>
+          <button class="btn btn-sm" onclick="importBackup()" style="color:var(--brown-mid);border-color:var(--brown-mid)">⬆ Import backup</button>
+          <input type="file" id="import-file-input" accept=".json" style="display:none" onchange="handleImportFile(event)">
           <button class="btn btn-sm btn-primary" onclick="saveSettings()">Save changes</button>
         </div>
       </div>
@@ -1854,8 +1858,13 @@ function renderSchedule() {
     Object.entries(schedData[di]).forEach(([ri, cnt]) => {
       if (cnt <= 0) return;
       const r = RECIPES[ri];
+      // Check if this recipe has pending orders
+      const riOrders = ORDERS.filter(o => o.recipeIdx == ri && o.status !== 'complete');
+      const orderTag = riOrders.length > 0
+        ? `<span style="font-size:9px;background:var(--amber);color:white;border-radius:8px;padding:1px 5px;margin-left:3px" title="${riOrders.map(o=>o.custName+': '+o.batchesNeeded+'b by '+o.due).join(', ')}">order</span>`
+        : '';
       batchHTML += `<div class="day-batch-item">
-        <span class="day-batch-name" title="${r.name}">${r.name}</span>
+        <span class="day-batch-name" title="${r.name}">${r.name}${orderTag}</span>
         <span class="day-batch-hrs">${(r.labor*cnt).toFixed(1)}h</span>
         <div class="day-batch-ctrl">
           <button class="day-btn" onclick="adjSched(${di},${ri},-1)">-</button>
@@ -1918,7 +1927,26 @@ function adjSched(di, ri, delta) {
   const next = Math.max(0, cur + delta);
   if (next === 0) delete schedData[di][ri];
   else schedData[di][ri] = next;
+  syncOrdersFromSchedule(ri);
   renderSchedule();
+  persistToStorage();
+}
+
+// Auto-sync open order batchesScheduled from schedule totals
+function syncOrdersFromSchedule(ri) {
+  const totalScheduled = DAYS.reduce((s, _, di) => s + (schedData[di][ri] || 0), 0);
+  // Find open orders for this recipe, sorted by due date (most urgent first)
+  const openOrders = ORDERS.filter(o => o.recipeIdx === ri && o.status !== 'complete')
+    .sort((a, b) => new Date(a.due) - new Date(b.due));
+  let remaining = totalScheduled;
+  openOrders.forEach(o => {
+    const prev = o.batchesScheduled;
+    o.batchesScheduled = Math.min(o.batchesNeeded, remaining);
+    remaining = Math.max(0, remaining - o.batchesNeeded);
+    if (o.batchesScheduled >= o.batchesNeeded) o.status = 'complete';
+    else o.status = 'pending';
+    if (o.batchesScheduled !== prev) sbUpdateOrder(o);
+  });
 }
 
 function openModal(di) {
@@ -1937,8 +1965,15 @@ function openModal(di) {
     const batchGP = Math.round(r.rev - r.ing - r.pack - r.labor * rate);
     const d = document.createElement('div');
     d.className = 'modal-product';
+    // Pending order demand for this recipe
+    const pendingOrders = ORDERS.filter(o => o.recipeIdx === i && o.status !== 'complete');
+    const totalNeeded = pendingOrders.reduce((s,o) => s + o.batchesNeeded, 0);
+    const totalSchedAllDays = DAYS.reduce((s,_,d2) => s + (schedData[d2][i]||0), 0);
+    const orderBadge = totalNeeded > 0
+      ? `<span style="font-size:10px;background:${totalSchedAllDays>=totalNeeded?'var(--green)':'var(--amber)'};color:white;border-radius:10px;padding:1px 6px;margin-left:4px">${totalSchedAllDays}/${totalNeeded} batches</span>`
+      : '';
     d.innerHTML = `<div>
-      <div class="modal-product-name">${r.name}</div>
+      <div class="modal-product-name">${r.name}${orderBadge}</div>
       <div class="modal-product-meta">${r.labor} hrs &middot; ${r.dz} dz &middot; $${batchCost} cost &middot; $${batchGP} profit</div>
     </div>
     <div style="display:flex;align-items:center;gap:6px">
@@ -2032,6 +2067,31 @@ function updateSchedSummary() {
   // update sub with blended info
   const allStaffHrs = DAYS.reduce((s,_,di)=>s+getDayLaborHours(di),0);
   document.getElementById('sched-lab-s').textContent = allStaffHrs > 0 ? 'blended staff rate' : 'no staff assigned';
+
+  // ── Open order coverage panel ──────────────────────────────────────────────
+  const covEl = document.getElementById('sched-order-coverage');
+  if (!covEl) return;
+  const openOrds = ORDERS.filter(o => o.status !== 'complete');
+  if (openOrds.length === 0) { covEl.innerHTML = ''; return; }
+  let html = `<div style="font-weight:600;font-size:13px;margin-bottom:8px;color:var(--brown)">Open order coverage</div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:4px">`;
+  openOrds.sort((a,b) => new Date(a.due)-new Date(b.due)).forEach(o => {
+    const pct = Math.min(100, Math.round(o.batchesScheduled / o.batchesNeeded * 100));
+    const color = pct >= 100 ? 'var(--green)' : pct >= 50 ? 'var(--amber)' : 'var(--red)';
+    const daysLeft = Math.round((new Date(o.due+' 00:00') - new Date()) / 86400000);
+    html += `<div style="background:var(--cream);border:1px solid var(--cream-dark);border-radius:10px;padding:8px 12px;min-width:180px;flex:1">
+      <div style="font-size:12px;font-weight:600;color:var(--brown);margin-bottom:2px">${o.recipeName}</div>
+      <div style="font-size:11px;color:var(--brown-light);margin-bottom:5px">${o.custName} · due ${o.due} (${daysLeft}d)</div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <div style="flex:1;height:6px;background:var(--cream-dark);border-radius:3px;overflow:hidden">
+          <div style="width:${pct}%;height:100%;background:${color};transition:width .3s"></div>
+        </div>
+        <span style="font-size:11px;font-weight:600;color:${color}">${o.batchesScheduled}/${o.batchesNeeded}</span>
+      </div>
+    </div>`;
+  });
+  html += '</div>';
+  covEl.innerHTML = html;
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────
@@ -2432,6 +2492,66 @@ function resetSettings() {
   showToast('Settings reset to defaults');
 }
 
+function exportBackup() {
+  const data = {
+    exportedAt: new Date().toISOString(),
+    version: 1,
+    lrate: LRATE,
+    ingredients: INGREDIENTS,
+    recipes: RECIPES,
+    employees: EMPLOYEES,
+    customers: CUSTOMERS,
+    orders: ORDERS,
+    finishedInv: FINISHED_INV,
+    fulfillmentLog: FULFILLMENT_LOG,
+    schedData: schedData,
+    staffData: staffData,
+    shopifyConfig: { url: shopifyConfig.url }
+  };
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'asm-bakery-backup-' + new Date().toISOString().split('T')[0] + '.json';
+  a.click();
+  showToast('Backup downloaded');
+}
+
+function importBackup() {
+  document.getElementById('import-file-input').click();
+}
+
+function handleImportFile(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = evt => {
+    try {
+      const data = JSON.parse(evt.target.result);
+      if (!data.version || !data.ingredients) { showToast('Invalid backup file'); return; }
+      if (!confirm('Import this backup? This will overwrite all current data.')) return;
+      if (data.lrate) LRATE = data.lrate;
+      if (data.ingredients) INGREDIENTS.splice(0, INGREDIENTS.length, ...data.ingredients);
+      if (data.recipes) RECIPES.splice(0, RECIPES.length, ...data.recipes);
+      if (data.employees) { EMPLOYEES.splice(0, EMPLOYEES.length, ...data.employees); nextEmpId = Math.max(...EMPLOYEES.map(e=>e.id||0), 0) + 1; }
+      if (data.customers) { CUSTOMERS.splice(0, CUSTOMERS.length, ...data.customers); nextCustId = Math.max(...CUSTOMERS.map(c=>c.id||0), 0) + 1; }
+      if (data.orders) { ORDERS.splice(0, ORDERS.length, ...data.orders); nextOrderId = Math.max(...ORDERS.map(o=>o.id||0), 0) + 1; }
+      if (data.finishedInv) Object.assign(FINISHED_INV, data.finishedInv);
+      if (data.fulfillmentLog) FULFILLMENT_LOG.splice(0, FULFILLMENT_LOG.length, ...data.fulfillmentLog);
+      if (data.schedData) data.schedData.forEach((d, i) => { schedData[i] = d; });
+      if (data.staffData) data.staffData.forEach((d, i) => { staffData[i] = d; });
+      persistToStorage();
+      buildSettings();
+      renderSchedule();
+      buildCustomersPane();
+      renderWholesaleOrders();
+      showToast('Backup imported successfully');
+    } catch(err) {
+      showToast('Failed to parse backup file: ' + err.message);
+    }
+  };
+  reader.readAsText(file);
+  e.target.value = '';
+}
 
 function persistToStorage() {
   const data = {
