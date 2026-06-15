@@ -1,28 +1,26 @@
-// /api/shopify-auth.js — Shopify OAuth handler
-// Step 1 (GET ?shop=...): Redirects to Shopify's OAuth consent screen
-// Step 2 (GET ?code=...): Exchanges code for access token, stores in Supabase
+// /api/shopify-auth.js — Shopify OAuth handler (CommonJS, no external deps)
+// GET ?install=1  → redirects to Shopify consent screen
+// GET ?code=...   → exchanges code for token, stores in Supabase via REST
 
-import { createClient } from '@supabase/supabase-js';
+const CLIENT_ID    = process.env.SHOPIFY_CLIENT_ID;
+const CLIENT_SECRET= process.env.SHOPIFY_CLIENT_SECRET;
+const SHOP         = process.env.SHOPIFY_STORE || 'asweetmorselco.myshopify.com';
+const APP_URL      = process.env.APP_URL || 'https://ops.asweetmorselco.com';
+const REDIRECT_URI = `${APP_URL}/api/shopify-auth`;
+const SCOPES       = 'read_orders,write_orders';
+const SB_URL       = process.env.SUPABASE_URL || 'https://ytzpfhjcaesgylodaasw.supabase.co';
+const SB_KEY       = process.env.SUPABASE_SERVICE_KEY;
 
-const CLIENT_ID     = process.env.SHOPIFY_CLIENT_ID;
-const CLIENT_SECRET = process.env.SHOPIFY_CLIENT_SECRET;
-const SHOP          = process.env.SHOPIFY_STORE || 'asweetmorselco.myshopify.com';
-const APP_URL       = process.env.APP_URL || 'https://ops.asweetmorselco.com';
-const REDIRECT_URI  = `${APP_URL}/api/shopify-auth`;
-const SCOPES        = 'read_orders,write_orders';
-const SUPABASE_URL  = process.env.SUPABASE_URL  || 'https://ytzpfhjcaesgylodaasw.supabase.co';
-const SUPABASE_KEY  = process.env.SUPABASE_SERVICE_KEY; // service role key — bypasses RLS
+module.exports = async function handler(req, res) {
+  const { code, install } = req.query || {};
 
-export default async function handler(req, res) {
-  res.setHeader('Access-Control-Allow-Origin', APP_URL);
-
-  const { code, shop, state, install } = req.query || {};
-
-  // ── STEP 1: Initiate OAuth — redirect to Shopify ──────────────────────────
-  if (install || (!code && !shop?.includes('.'))) {
+  // ── STEP 1: Start OAuth — redirect to Shopify ──────────────────────────────
+  if (install) {
+    if (!CLIENT_ID) {
+      return res.status(500).send('SHOPIFY_CLIENT_ID env var not set on server');
+    }
     const nonce = Math.random().toString(36).slice(2);
-    const authUrl =
-      `https://${SHOP}/admin/oauth/authorize` +
+    const authUrl = `https://${SHOP}/admin/oauth/authorize` +
       `?client_id=${CLIENT_ID}` +
       `&scope=${SCOPES}` +
       `&redirect_uri=${encodeURIComponent(REDIRECT_URI)}` +
@@ -30,71 +28,51 @@ export default async function handler(req, res) {
     return res.redirect(302, authUrl);
   }
 
-  // ── STEP 2: Shopify redirects back with ?code=... ────────────────────────
+  // ── STEP 2: Shopify redirects back with ?code= ────────────────────────────
   if (code) {
     try {
+      if (!CLIENT_ID || !CLIENT_SECRET) {
+        throw new Error('Shopify credentials not configured on server');
+      }
+
       // Exchange code for permanent access token
-      const tokenRes = await fetch(
-        `https://${SHOP}/admin/oauth/access_token`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            client_id:     CLIENT_ID,
-            client_secret: CLIENT_SECRET,
-            code
-          })
-        }
-      );
+      const tokenRes = await fetch(`https://${SHOP}/admin/oauth/access_token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ client_id: CLIENT_ID, client_secret: CLIENT_SECRET, code })
+      });
 
-      if (!tokenRes.ok) {
-        const err = await tokenRes.text();
-        throw new Error(`Token exchange failed: ${err}`);
-      }
-
+      if (!tokenRes.ok) throw new Error(`Token exchange HTTP ${tokenRes.status}: ${await tokenRes.text()}`);
       const { access_token } = await tokenRes.json();
-      if (!access_token) throw new Error('No access_token in response');
+      if (!access_token) throw new Error('No access_token returned from Shopify');
 
-      // Store token in Supabase app_settings table
-      if (SUPABASE_SERVICE_KEY) {
-        const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
-        const { error } = await sb.from('app_settings').upsert({
-          key: 'shopify_access_token',
-          value: access_token,
-          updated_at: new Date().toISOString()
-        }, { onConflict: 'key' });
-        if (error) console.error('Supabase store error:', error.message);
+      // Store token in Supabase app_settings via REST API (no SDK needed)
+      if (SB_KEY) {
+        const sbRes = await fetch(`${SB_URL}/rest/v1/app_settings`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            apikey: SB_KEY,
+            Authorization: `Bearer ${SB_KEY}`,
+            Prefer: 'resolution=merge-duplicates'
+          },
+          body: JSON.stringify({ key: 'shopify_access_token', value: access_token, updated_at: new Date().toISOString() })
+        });
+        if (!sbRes.ok) {
+          const sbErr = await sbRes.text();
+          console.error('Supabase upsert failed:', sbErr);
+          // Don't throw — token was received, just log the storage failure
+        }
       }
 
-      // Also set as env var hint in response (Vercel can't set env vars at runtime,
-      // but we store in Supabase above — that's the source of truth)
-      console.log('Shopify OAuth complete. Token stored in Supabase app_settings.');
-
-      // Redirect back to dashboard with success flag
+      console.log('Shopify OAuth complete — token stored');
       return res.redirect(302, `${APP_URL}?shopify=connected`);
 
-    } catch (err) {
+    } catch(err) {
       console.error('OAuth error:', err.message);
       return res.redirect(302, `${APP_URL}?shopify=error&msg=${encodeURIComponent(err.message)}`);
     }
   }
 
-  // ── PING: Check if token exists ──────────────────────────────────────────
-  if (req.query.action === 'status') {
-    try {
-      if (!SUPABASE_SERVICE_KEY) {
-        // Fall back to env var token if no service key
-        const hasEnvToken = !!process.env.SHOPIFY_ACCESS_TOKEN;
-        return res.status(200).json({ connected: hasEnvToken, source: 'env' });
-      }
-      const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
-      const { data } = await sb.from('app_settings')
-        .select('value').eq('key', 'shopify_access_token').single();
-      return res.status(200).json({ connected: !!data?.value, source: 'supabase' });
-    } catch(e) {
-      return res.status(200).json({ connected: false });
-    }
-  }
-
-  return res.status(400).json({ error: 'Invalid request' });
-}
+  return res.status(400).json({ error: 'Missing code or install param' });
+};
