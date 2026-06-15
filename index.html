@@ -1054,8 +1054,8 @@ input[type=number] {
         <!-- Shopify config panel -->
         <div id="shopify-config" style="display:none;background:var(--cream);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:16px">
 
-          <p style="font-size:11px;color:var(--brown-light);margin-top:8px">Your Shopify token is stored securely on the server (Vercel env vars). Click below to verify the connection.</p>
-          <button class="btn btn-primary btn-sm" onclick="connectShopify()" style="margin-top:6px">Test connection</button>
+          <p style="font-size:11px;color:var(--brown-light);margin-top:8px">Click below to connect your Shopify store. You'll be redirected to Shopify to approve access, then returned here automatically.</p>
+          <button class="btn btn-primary btn-sm" onclick="startShopifyOAuth()" style="margin-top:6px">Connect to Shopify</button>
         </div>
 
         <div id="shopify-orders-list">
@@ -1325,6 +1325,16 @@ document.addEventListener('DOMContentLoaded', () => {
       const { data: { session } } = await getClient().auth.getSession();
       if (session?.user) {
         await onSignedIn(session.user);
+        // Check if we're returning from Shopify OAuth
+        const params = new URLSearchParams(window.location.search);
+        if (params.get('shopify') === 'connected') {
+          history.replaceState({}, '', window.location.pathname);
+          showToast('Shopify connected! Loading orders…');
+          setTimeout(() => connectShopify(), 800);
+        } else if (params.get('shopify') === 'error') {
+          history.replaceState({}, '', window.location.pathname);
+          showToast('Shopify connection failed: ' + (params.get('msg') || 'Unknown error'));
+        }
       }
     } catch(e) { console.error('Session check error:', e.message); }
   }, 50);
@@ -3088,7 +3098,14 @@ function toggleShopifyConfig() {
   el.style.display = el.style.display === 'none' ? 'block' : 'none';
 }
 
+function startShopifyOAuth() {
+  // Redirect to our Vercel function which kicks off the Shopify OAuth flow
+  window.location.href = '/api/shopify-auth?install=1';
+}
+
 async function connectShopify() {
+  // Called after OAuth completes (redirect back with ?shopify=connected)
+  // Also used to re-verify an existing connection
   const badge   = document.getElementById('shopify-status-badge');
   const syncBtn = document.getElementById('shopify-sync-btn');
   badge.textContent = 'Connecting…'; badge.className = 'badge b-warn';
