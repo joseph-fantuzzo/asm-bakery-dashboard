@@ -1042,7 +1042,7 @@ input[type=number] {
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:10px">
           <div>
             <div class="card-title" style="margin-bottom:2px">Shopify retail orders</div>
-            <p style="font-size:12px;color:var(--brown-light)">Live orders from your Shopify store. Requires API credentials to connect.</p>
+            <p style="font-size:12px;color:var(--brown-light)">Live orders from asweetmorselco.myshopify.com — fulfill here and Shopify updates automatically.</p>
           </div>
           <div style="display:flex;gap:8px;align-items:center">
             <span id="shopify-status-badge" class="badge b-warn">Not connected</span>
@@ -1053,18 +1053,9 @@ input[type=number] {
 
         <!-- Shopify config panel -->
         <div id="shopify-config" style="display:none;background:var(--cream);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:16px">
-          <div style="display:grid;grid-template-columns:2fr 2fr 1fr;gap:10px;align-items:end">
-            <div style="display:flex;flex-direction:column;gap:4px">
-              <label style="font-size:11px;color:var(--brown-light);font-weight:500">Store URL</label>
-              <input type="text" id="shopify-url" placeholder="yourstore.myshopify.com" style="padding:6px 10px;font-size:13px;border:1px solid var(--border-strong);border-radius:6px;font-family:'DM Sans',sans-serif;width:100%">
-            </div>
-            <div style="display:flex;flex-direction:column;gap:4px">
-              <label style="font-size:11px;color:var(--brown-light);font-weight:500">API access token</label>
-              <input type="password" id="shopify-token" placeholder="shpat_xxxxxxxxxxxx" style="padding:6px 10px;font-size:13px;border:1px solid var(--border-strong);border-radius:6px;font-family:'DM Sans',sans-serif;width:100%">
-            </div>
-            <button class="btn btn-primary btn-sm" onclick="connectShopify()" style="margin-bottom:1px">Connect</button>
-          </div>
-          <p style="font-size:11px;color:var(--brown-light);margin-top:8px">Create a Custom App in your Shopify Admin → Apps → Develop apps. Grant read access to Orders. Paste the Admin API access token above.</p>
+
+          <p style="font-size:11px;color:var(--brown-light);margin-top:8px">Your Shopify token is stored securely on the server (Vercel env vars). Click below to verify the connection.</p>
+          <button class="btn btn-primary btn-sm" onclick="connectShopify()" style="margin-top:6px">Test connection</button>
         </div>
 
         <div id="shopify-orders-list">
@@ -3095,81 +3086,107 @@ function buildOrders() {
 function toggleShopifyConfig() {
   const el = document.getElementById('shopify-config');
   el.style.display = el.style.display === 'none' ? 'block' : 'none';
-  if (shopifyConfig.url) document.getElementById('shopify-url').value = shopifyConfig.url;
 }
 
 async function connectShopify() {
-  const url   = document.getElementById('shopify-url').value.trim().replace(/\/+$/, '');
-  const token = document.getElementById('shopify-token').value.trim();
-  if (!url || !token) { showToast('Please enter your store URL and API token'); return; }
-  showToast('Connecting to Shopify…');
+  const badge   = document.getElementById('shopify-status-badge');
+  const syncBtn = document.getElementById('shopify-sync-btn');
+  badge.textContent = 'Connecting…'; badge.className = 'badge b-warn';
   try {
-    const storeUrl = url.includes('myshopify.com') ? url : url + '.myshopify.com';
-    const res = await fetch(`https://${storeUrl}/admin/api/2024-01/orders.json?status=open&limit=50`, {
-      headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' }
-    });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const res  = await fetch('/api/shopify?action=getOrders');
     const data = await res.json();
-    shopifyConfig = { url: storeUrl, token, connected: true };
-    document.getElementById('shopify-status-badge').textContent = 'Connected';
-    document.getElementById('shopify-status-badge').className = 'badge b-green';
-    document.getElementById('shopify-sync-btn').style.display = '';
+    if (!res.ok || data.error) throw new Error(data.error || 'Unknown error');
+    shopifyConfig.connected = true;
+    badge.textContent = 'Connected'; badge.className = 'badge b-green';
+    syncBtn.style.display = '';
     document.getElementById('shopify-config').style.display = 'none';
     renderShopifyOrdersData(data.orders || []);
     persistToStorage();
-    showToast('Shopify connected — ' + (data.orders||[]).length + ' open orders loaded');
+    showToast('Shopify connected — ' + (data.orders||[]).length + ' open orders');
   } catch(e) {
-    showToast('Connection failed — check your store URL and token');
-    document.getElementById('shopify-status-badge').textContent = 'Connection failed';
-    document.getElementById('shopify-status-badge').className = 'badge b-red';
+    badge.textContent = 'Connection failed'; badge.className = 'badge b-red';
+    showToast('Shopify connection failed: ' + e.message);
   }
 }
 
 async function syncShopify() {
   if (!shopifyConfig.connected) { showToast('Shopify not connected'); return; }
-  showToast('Syncing…');
+  const btn = document.getElementById('shopify-sync-btn');
+  btn.textContent = 'Syncing…'; btn.disabled = true;
   try {
-    const res = await fetch(`https://${shopifyConfig.url}/admin/api/2024-01/orders.json?status=open&limit=50`, {
-      headers: { 'X-Shopify-Access-Token': shopifyConfig.token }
-    });
+    const res  = await fetch('/api/shopify?action=getOrders');
     const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || 'Unknown error');
     renderShopifyOrdersData(data.orders || []);
     showToast('Synced — ' + (data.orders||[]).length + ' open orders');
-  } catch(e) { showToast('Sync failed'); }
+  } catch(e) {
+    showToast('Sync failed: ' + e.message);
+  } finally {
+    btn.textContent = 'Sync now'; btn.disabled = false;
+  }
 }
 
 function renderShopifyOrders() {
-  if (!shopifyConfig.connected) return;
-  syncShopify();
+  if (shopifyConfig.connected) syncShopify();
+}
+
+async function fulfillShopifyOrder(shopifyId, btnEl) {
+  if (!confirm('Mark this Shopify order as fulfilled? This will notify the customer.')) return;
+  btnEl.textContent = 'Fulfilling…'; btnEl.disabled = true;
+  try {
+    const res  = await fetch('/api/shopify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'fulfillOrder', orderId: shopifyId })
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || 'Unknown error');
+    showToast('Order fulfilled in Shopify ✓');
+    const row = btnEl.closest('tr');
+    if (row) { row.style.opacity = '0.4'; setTimeout(() => row.remove(), 800); }
+  } catch(e) {
+    showToast('Fulfill failed: ' + e.message);
+    btnEl.textContent = 'Fulfill'; btnEl.disabled = false;
+  }
 }
 
 function renderShopifyOrdersData(orders) {
   const el = document.getElementById('shopify-orders-list');
-  if (!orders.length) { el.innerHTML = '<p style="font-size:13px;color:var(--brown-light);text-align:center;padding:20px">No open Shopify orders.</p>'; return; }
+  if (!orders.length) {
+    el.innerHTML = '<p style="font-size:13px;color:var(--brown-light);text-align:center;padding:20px">No open Shopify orders — you\'re all caught up!</p>';
+    return;
+  }
   el.innerHTML = '';
   const tbl = document.createElement('table');
   tbl.className = 'tbl';
   tbl.innerHTML = `<thead><tr>
-    <th>Order #</th><th>Customer</th><th>Items</th><th>Total</th><th>Date</th><th>Production status</th>
+    <th>Order #</th><th>Customer</th><th>Items</th><th>Total</th><th>Date</th><th>Status</th><th></th>
   </tr></thead>`;
   const tbody = document.createElement('tbody');
   orders.forEach(o => {
-    const items = (o.line_items || []).map(li => li.name + ' ×' + li.quantity).join(', ');
+    const lineItems = o.lineItems?.edges || [];
+    const items = lineItems.map(e => e.node.name + ' ×' + e.node.quantity).join(', ');
+    const total = parseFloat(o.totalPriceSet?.shopMoney?.amount || 0).toFixed(2);
+    const customer = o.customer
+      ? (o.customer.firstName + ' ' + o.customer.lastName).trim()
+      : 'Guest';
+    const date = formatDate((o.createdAt||'').split('T')[0]);
+    const status = o.displayFulfillmentStatus || 'UNFULFILLED';
+    const statusColor = status === 'UNFULFILLED' ? 'b-amber' : status === 'PARTIAL' ? 'b-warn' : 'b-green';
     const tr = document.createElement('tr');
     tr.innerHTML = `
-      <td><strong>#${o.order_number}</strong></td>
-      <td>${o.customer ? o.customer.first_name + ' ' + o.customer.last_name : 'Guest'}</td>
-      <td style="font-size:12px;color:var(--brown-mid)">${items}</td>
-      <td>$${parseFloat(o.total_price||0).toFixed(2)}</td>
-      <td style="color:var(--brown-light)">${formatDate(o.created_at?.split('T')[0])}</td>
-      <td><span class="badge b-amber">Needs scheduling</span></td>`;
+      <td><strong>${o.name}</strong></td>
+      <td>${customer}</td>
+      <td style="font-size:12px;color:var(--brown-mid);max-width:260px">${items}</td>
+      <td>$${total}</td>
+      <td style="color:var(--brown-light)">${date}</td>
+      <td><span class="badge ${statusColor}">${status.replace('_',' ')}</span></td>
+      <td><button class="btn btn-sm btn-primary" style="font-size:11px" onclick="fulfillShopifyOrder('${o.id}', this)">Fulfill</button></td>`;
     tbody.appendChild(tr);
   });
   tbl.appendChild(tbody);
   el.appendChild(tbl);
 }
-
-
 
 // ── Wholesale Customers Pane ──────────────────────────────────────────────────
 
