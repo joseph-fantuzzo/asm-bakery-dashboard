@@ -42,13 +42,23 @@ module.exports = async function handler(req, res) {
     // ── GET OPEN / UNFULFILLED ORDERS ───────────────────────────────────────
     if (!action || action === 'getOrders') {
       const gql = `{
-        orders(first:100, query:"fulfillment_status:unshipped OR fulfillment_status:partial", sortKey:CREATED_AT, reverse:true) {
+        orders(first:100, query:"fulfillment_status:unfulfilled OR fulfillment_status:partial", sortKey:CREATED_AT, reverse:true) {
           edges { node {
-            id name displayFulfillmentStatus createdAt
+            id
+            name
+            fulfillmentStatus
+            createdAt
             totalPriceSet { shopMoney { amount currencyCode } }
             customer { firstName lastName email }
-            lineItems(first:50) { edges { node { id name quantity sku originalUnitPriceSet { shopMoney { amount } } } } }
-            note tags
+            lineItems(first:50) {
+              edges { node {
+                id
+                name
+                quantity
+                sku
+              }}
+            }
+            note
           }}
         }
       }`;
