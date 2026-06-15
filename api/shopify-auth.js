@@ -4,7 +4,7 @@
 
 const CLIENT_ID    = process.env.SHOPIFY_CLIENT_ID;
 const CLIENT_SECRET= process.env.SHOPIFY_CLIENT_SECRET;
-const SHOP         = process.env.SHOPIFY_STORE || 'asweetmorselco.myshopify.com';
+const SHOP         = process.env.SHOPIFY_STORE || 'a-sweet-morsel-co.myshopify.com';
 const APP_URL      = process.env.APP_URL || 'https://ops.asweetmorselco.com';
 const REDIRECT_URI = `${APP_URL}/api/shopify-auth`;
 const SCOPES       = 'read_orders,write_orders';
