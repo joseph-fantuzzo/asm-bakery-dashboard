@@ -1327,13 +1327,28 @@ document.addEventListener('DOMContentLoaded', () => {
         await onSignedIn(session.user);
         // Check if we're returning from Shopify OAuth
         const params = new URLSearchParams(window.location.search);
-        if (params.get('shopify') === 'connected') {
+        const fragment = new URLSearchParams(window.location.hash.slice(1));
+        const shopifyToken = fragment.get('shopify_token');
+        if (shopifyToken) {
+          // Token passed via URL fragment from OAuth callback
+          localStorage.setItem('shopify_access_token', decodeURIComponent(shopifyToken));
+          shopifyConfig.connected = true;
           history.replaceState({}, '', window.location.pathname);
+          const badge = document.getElementById('shopify-status-badge');
+          const syncBtn = document.getElementById('shopify-sync-btn');
+          if (badge) { badge.textContent = 'Connected'; badge.className = 'badge b-green'; }
+          if (syncBtn) syncBtn.style.display = '';
           showToast('Shopify connected! Loading orders…');
-          setTimeout(() => connectShopify(), 800);
+          setTimeout(() => syncShopify(), 800);
         } else if (params.get('shopify') === 'error') {
           history.replaceState({}, '', window.location.pathname);
           showToast('Shopify connection failed: ' + (params.get('msg') || 'Unknown error'));
+        } else if (localStorage.getItem('shopify_access_token')) {
+          shopifyConfig.connected = true;
+          const badge = document.getElementById('shopify-status-badge');
+          const syncBtn = document.getElementById('shopify-sync-btn');
+          if (badge) { badge.textContent = 'Connected'; badge.className = 'badge b-green'; }
+          if (syncBtn) syncBtn.style.display = '';
         }
       }
     } catch(e) { console.error('Session check error:', e.message); }
@@ -3163,14 +3178,17 @@ function startShopifyOAuth() {
   window.location.href = '/api/shopify-auth?install=1';
 }
 
+function shopifyHeaders() {
+  const tok = localStorage.getItem('shopify_access_token');
+  return tok ? { 'Content-Type': 'application/json', 'X-Shopify-Token': tok } : { 'Content-Type': 'application/json' };
+}
+
 async function connectShopify() {
-  // Called after OAuth completes (redirect back with ?shopify=connected)
-  // Also used to re-verify an existing connection
   const badge   = document.getElementById('shopify-status-badge');
   const syncBtn = document.getElementById('shopify-sync-btn');
   badge.textContent = 'Connecting…'; badge.className = 'badge b-warn';
   try {
-    const res  = await fetch('/api/shopify?action=getOrders');
+    const res  = await fetch('/api/shopify?action=getOrders', { headers: shopifyHeaders() });
     const data = await res.json();
     if (!res.ok || data.error) throw new Error(data.error || 'Unknown error');
     shopifyConfig.connected = true;
@@ -3182,7 +3200,7 @@ async function connectShopify() {
     showToast('Shopify connected — ' + (data.orders||[]).length + ' open orders');
   } catch(e) {
     badge.textContent = 'Connection failed'; badge.className = 'badge b-red';
-    showToast('Shopify connection failed: ' + e.message);
+    showToast('Shopify: ' + e.message);
   }
 }
 
@@ -3191,7 +3209,7 @@ async function syncShopify() {
   const btn = document.getElementById('shopify-sync-btn');
   btn.textContent = 'Syncing…'; btn.disabled = true;
   try {
-    const res  = await fetch('/api/shopify?action=getOrders');
+    const res  = await fetch('/api/shopify?action=getOrders', { headers: shopifyHeaders() });
     const data = await res.json();
     if (!res.ok || data.error) throw new Error(data.error || 'Unknown error');
     renderShopifyOrdersData(data.orders || []);
@@ -3213,7 +3231,7 @@ async function fulfillShopifyOrder(shopifyId, btnEl) {
   try {
     const res  = await fetch('/api/shopify', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: shopifyHeaders(),
       body: JSON.stringify({ action: 'fulfillOrder', orderId: shopifyId })
     });
     const data = await res.json();
