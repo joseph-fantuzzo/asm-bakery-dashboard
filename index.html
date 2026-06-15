@@ -3127,6 +3127,24 @@ function formatDate(str) {
 }
 
 function buildOrders() {
+  // Auto-check Shopify connection status
+  if (!shopifyConfig.connected) {
+    fetch('/api/shopify-auth?action=status')
+      .then(r => r.json())
+      .then(d => {
+        if (d.connected) {
+          shopifyConfig.connected = true;
+          const badge = document.getElementById('shopify-status-badge');
+          const syncBtn = document.getElementById('shopify-sync-btn');
+          if (badge) { badge.textContent = 'Connected'; badge.className = 'badge b-green'; }
+          if (syncBtn) syncBtn.style.display = '';
+          syncShopify();
+        }
+      }).catch(() => {});
+  } else {
+    syncShopify();
+  }
+
   populateOrderCustomerDropdown();
   populateOrderProductDropdown();
   renderWholesaleOrders();
@@ -3230,7 +3248,7 @@ function renderShopifyOrdersData(orders) {
       ? (o.customer.firstName + ' ' + o.customer.lastName).trim()
       : 'Guest';
     const date = formatDate((o.createdAt||'').split('T')[0]);
-    const status = (o.fulfillmentStatus || 'UNFULFILLED').replace(/_/g, ' ');
+    const status = (o.displayFulfillmentStatus || 'UNFULFILLED').replace(/_/g,' ');
     const statusColor = status === 'UNFULFILLED' ? 'b-amber' : status === 'PARTIAL' ? 'b-warn' : 'b-green';
     const tr = document.createElement('tr');
     tr.innerHTML = `
