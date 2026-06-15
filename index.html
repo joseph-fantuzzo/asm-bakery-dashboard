@@ -1465,8 +1465,50 @@ function buildPricingFromDb(pricingRows) {
   return pricing;
 }
 
-// ── Data ──────────────────────────────────────────────────────────────────────
-// ── Data arrays — populated from Supabase after login ────────────────────────
+// ── Pane navigation ───────────────────────────────────────────────────────────
+function showPane(id, navEl) {
+  // Update nav active state
+  document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
+  if (navEl) navEl.classList.add('active');
+
+  // Show the right pane
+  document.querySelectorAll('.pane').forEach(p => p.classList.remove('active'));
+  const pane = document.getElementById('pane-' + id);
+  if (pane) pane.classList.add('active');
+
+  // Call the appropriate builder
+  switch(id) {
+    case 'overview':    buildOverviewPane(); break;
+    case 'inventory':   buildInventoryPane(); break;
+    case 'optimizer':   buildOptimizer(); break;
+    case 'schedule':    buildSchedule(); updateSchedSummary(); break;
+    case 'finished':    buildFinished(); break;
+    case 'orders':      buildOrders(); break;
+    case 'customers':   buildCustomersPane(); break;
+    case 'purchasing':  buildPO(); break;
+    case 'settings':    buildSettings(); break;
+  }
+}
+
+function buildOverviewPane() {
+  // Refresh dynamic values in overview metrics
+  const activeRecipes = RECIPES.filter(r => !r.archived).length;
+  const el = document.querySelector('#pane-overview .metric-value');
+  if (el) el.textContent = activeRecipes;
+  updateOverviewInventoryMetrics();
+}
+
+function buildInventoryPane() {
+  // Inventory renders from its own static HTML + live onHand inputs — just refresh
+  INGREDIENTS.forEach((ing, i) => {
+    const el = document.getElementById('inv-oh-' + i);
+    if (el) el.value = ing.onHand || 0;
+    const reEl = document.getElementById('inv-re-' + i);
+    if (reEl) reEl.value = ing.reorder || 0;
+  });
+}
+
+
 // These start empty and are filled by loadFromSupabase()
 const RECIPES = [];
 const INGREDIENTS = [];
