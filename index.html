@@ -1263,11 +1263,30 @@ async function doSignOut() {
 async function onSignedIn(user) {
   currentUser = user;
   // Fetch role from profiles table
-  const { data: profile } = await getClient()
+  let { data: profile } = await getClient()
     .from('profiles')
     .select('role, full_name')
     .eq('id', user.id)
     .single();
+
+  // Auto-provision profile if missing (e.g. new user created via Supabase Auth dashboard)
+  if (!profile) {
+    // Assign role based on known emails; default to 'production' for unknown
+    const adminEmails = ['casey@asweetmorselco.com', 'anna.barker@asweetmorselco.com'];
+    const ownerEmails = ['joe@asweetmorselco.com'];
+    let defaultRole = 'production';
+    if (ownerEmails.includes(user.email)) defaultRole = 'owner';
+    else if (adminEmails.includes(user.email)) defaultRole = 'admin';
+
+    const { data: newProfile, error: profileErr } = await getClient()
+      .from('profiles')
+      .insert({ id: user.id, role: defaultRole, full_name: user.email.split('@')[0] })
+      .select('role, full_name')
+      .single();
+    if (profileErr) console.warn('Profile auto-provision failed:', profileErr.message);
+    profile = newProfile || { role: defaultRole, full_name: user.email.split('@')[0] };
+  }
+
   currentRole = profile?.role || 'production';
   const fullName = profile?.full_name || user.email;
   const initials = fullName.split(' ').map(w => w[0]).join('').slice(0,2).toUpperCase();
@@ -1390,8 +1409,30 @@ async function loadFromSupabase() {
       if (ORDERS.length > 0) nextOrderId = Math.max(...ORDERS.map(o => o.id)) + 1;
     }
 
+    // Fetch employees
+    const { data: empData } = await client.from('employees').select('*').order('name');
+    if (empData && empData.length > 0) {
+      const mapped = empData.map(e => ({
+        id: e.id, sbId: e.id, name: e.name,
+        type: e.emp_type || 'hourly', rate: parseFloat(e.rate) || 0,
+        color: e.color || (typeof EMP_COLORS !== 'undefined' ? EMP_COLORS[0] : '#888')
+      }));
+      EMPLOYEES.splice(0, EMPLOYEES.length, ...mapped);
+      nextEmpId = Math.max(...EMPLOYEES.map(e => e.id)) + 1;
+    }
+
+    // Fetch finished inventory
+    const { data: finData } = await client.from('finished_inventory').select('*, recipes(id)');
+    if (finData && finData.length > 0) {
+      Object.keys(FINISHED_INV).forEach(k => delete FINISHED_INV[k]);
+      finData.forEach(f => {
+        const ri = RECIPES.findIndex(r => r.id === f.recipe_id);
+        if (ri >= 0) FINISHED_INV[ri] = { batches: parseFloat(f.batches_on_hand) || 0, log: [] };
+      });
+    }
+
     _supabaseDataLoaded = true;
-    console.log(`Supabase loaded: ${INGREDIENTS.length} ingredients, ${RECIPES.length} recipes, ${CUSTOMERS.length} customers, ${ORDERS.length} orders`);
+    console.log(`Supabase loaded: ${INGREDIENTS.length} ingredients, ${RECIPES.length} recipes, ${CUSTOMERS.length} customers, ${ORDERS.length} orders, ${EMPLOYEES.length} employees`);
 
     // Refresh current pane if visible
     const activePane = document.querySelector('.pane.active');
