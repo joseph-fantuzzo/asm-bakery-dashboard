@@ -3230,7 +3230,7 @@ function renderShopifyOrdersData(orders) {
       ? (o.customer.firstName + ' ' + o.customer.lastName).trim()
       : 'Guest';
     const date = formatDate((o.createdAt||'').split('T')[0]);
-    const status = o.displayFulfillmentStatus || 'UNFULFILLED';
+    const status = (o.fulfillmentStatus || 'UNFULFILLED').replace(/_/g, ' ');
     const statusColor = status === 'UNFULFILLED' ? 'b-amber' : status === 'PARTIAL' ? 'b-warn' : 'b-green';
     const tr = document.createElement('tr');
     tr.innerHTML = `
