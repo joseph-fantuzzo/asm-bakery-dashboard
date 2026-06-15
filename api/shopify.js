@@ -1,7 +1,7 @@
 // /api/shopify.js — Shopify GraphQL proxy (CommonJS, no external deps)
 // Reads Shopify access token from Supabase REST API or env var fallback.
 
-const SHOP         = process.env.SHOPIFY_STORE || 'asweetmorselco.myshopify.com';
+const SHOP         = process.env.SHOPIFY_STORE || 'a-sweet-morsel-co.myshopify.com';
 const SHOPIFY_URL  = `https://${SHOP}/admin/api/2026-04/graphql.json`;
 const SB_URL       = process.env.SUPABASE_URL || 'https://ytzpfhjcaesgylodaasw.supabase.co';
 const SB_KEY       = process.env.SUPABASE_SERVICE_KEY;
