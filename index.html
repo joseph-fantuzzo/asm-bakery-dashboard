@@ -1635,7 +1635,9 @@ function addEmployee() {
   const rate = parseFloat(document.getElementById('new-emp-rate').value);
   if (!name || isNaN(rate) || rate <= 0) { showToast('Please enter a name and rate'); return; }
   const color = EMP_COLORS[EMPLOYEES.length % EMP_COLORS.length];
-  EMPLOYEES.push({id: nextEmpId++, name, type, rate, color});
+  const newEmp = {id: nextEmpId++, name, type, rate, color};
+  EMPLOYEES.push(newEmp);
+  sbSaveEmployee(newEmp);
   document.getElementById('new-emp-name').value = '';
   document.getElementById('new-emp-rate').value = '';
   renderEmpList();
@@ -1665,6 +1667,7 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 function removeEmployee(id) {
+  sbDeleteEmployee(id);
   EMPLOYEES = EMPLOYEES.filter(e => e.id !== id);
   // also remove from all staffData
   for (let di = 0; di < 7; di++) {
@@ -1743,6 +1746,7 @@ function updateEmployee(id, field, value) {
       : '$' + (emp.rate * 8).toFixed(0) + '/8hr day';
   }
   persistToStorage();
+  sbSaveEmployee(emp);
   // Refresh schedule labor costs silently
   updateSchedSummary();
 }
@@ -2025,6 +2029,7 @@ function updateIngCost(i, value) {
   if (!isNaN(v) && v >= 0) {
     INGREDIENTS[i].unitCost = v;
     persistToStorage();
+    sbSaveIngredient(INGREDIENTS[i]);
   }
 }
 
@@ -2051,7 +2056,9 @@ function addNewIngredient() {
   if (INGREDIENTS.find(i => i.name.toLowerCase() === name.toLowerCase())) {
     showToast(name + ' already exists in the ingredient list'); return;
   }
-  INGREDIENTS.push({ name, unit, onHand: 0, reorder: 0, unitCost: cost, supplier });
+  const newIng = { name, unit, onHand: 0, reorder: 0, unitCost: cost, supplier };
+  INGREDIENTS.push(newIng);
+  sbAddIngredient(newIng);
   hideAddIngForm();
   renderIngList();
   persistToStorage();
@@ -2068,6 +2075,7 @@ function removeIngredient(i) {
   } else {
     if (!confirm(`Remove "${ing.name}" from the ingredient list?`)) return;
   }
+  sbDeleteIngredient(ing.id);
   INGREDIENTS.splice(i, 1);
   renderIngList();
   persistToStorage();
@@ -2099,7 +2107,9 @@ function addNewRecipe() {
   if (!name) { showToast('Please enter a recipe name'); return; }
   const totalCost = labor * LRATE + pack;
   const margin = rev > 0 ? parseFloat(((rev - totalCost) / rev).toFixed(4)) : 0;
-  RECIPES.push({ name, dz, labor, rev, pack, ing: 0, margin, ingredients: [], archived: false });
+  const newRecipe = { name, dz, labor, rev, pack, ing: 0, margin, ingredients: [], archived: false };
+  RECIPES.push(newRecipe);
+  sbAddRecipe(newRecipe);
   hideAddRecipeForm();
   buildRecipeTable();
   persistToStorage();
@@ -2112,6 +2122,7 @@ function archiveRecipe(i) {
   expandedRecipes.delete(i);
   buildRecipeTable();
   persistToStorage();
+  sbSaveRecipe(RECIPES[i]);
   showToast(RECIPES[i].name + ' archived');
 }
 
@@ -2119,6 +2130,7 @@ function restoreRecipe(i) {
   RECIPES[i].archived = false;
   buildRecipeTable();
   persistToStorage();
+  sbSaveRecipe(RECIPES[i]);
   showToast(RECIPES[i].name + ' restored');
 }
 
@@ -2297,6 +2309,7 @@ function updateIng(ri, ii, field, value) {
   recipeIngCost(ri);
   updateCostPerDz(ri);
   persistToStorage();
+  sbSaveRecipeIngredients(RECIPES[ri]);
 }
 
 function addIngredientRow(ri) {
@@ -2311,6 +2324,7 @@ function addIngredientRow(ri) {
   recipeIngCost(ri);
   updateCostPerDz(ri);
   persistToStorage();
+  sbSaveRecipeIngredients(RECIPES[ri]);
 }
 
 function removeIng(ri, ii) {
@@ -2318,6 +2332,7 @@ function removeIng(ri, ii) {
   recipeIngCost(ri);
   buildRecipeTable(); // full rebuild to re-index
   persistToStorage();
+  sbSaveRecipeIngredients(RECIPES[ri]);
 }
 
 function recipeIngCost(i) {
@@ -2361,6 +2376,8 @@ function saveSettings() {
 
   renderIngList();
   persistToStorage();
+  sbSaveAllIngredients();
+  RECIPES.forEach(r => sbSaveRecipe(r));
   showToast('Settings saved');
 }
 
@@ -2392,6 +2409,219 @@ function persistToStorage() {
   };
   try { localStorage.setItem('bakery_settings', JSON.stringify(data)); } catch(e) {}
 }
+
+
+// ── Supabase write helpers ────────────────────────────────────────────────────
+// Each helper is fire-and-forget (no await at call site) — localStorage is the
+// immediate cache; Supabase is the durable store. Errors are logged, not thrown.
+
+async function sbSaveIngredient(ing) {
+  if (!ing || !ing.id) return;
+  const client = getClient();
+  const { error } = await client.from('ingredients').update({
+    unit_cost: ing.unitCost,
+    on_hand: ing.onHand,
+    reorder_point: ing.reorder,
+    supplier: ing.supplier
+  }).eq('id', ing.id);
+  if (error) console.error('sbSaveIngredient:', error.message);
+}
+
+async function sbSaveAllIngredients() {
+  if (!INGREDIENTS.length) return;
+  const client = getClient();
+  const rows = INGREDIENTS.filter(i => i.id).map(i => ({
+    id: i.id, unit_cost: i.unitCost, on_hand: i.onHand,
+    reorder_point: i.reorder, supplier: i.supplier
+  }));
+  for (const row of rows) {
+    const { error } = await client.from('ingredients').update(row).eq('id', row.id);
+    if (error) console.error('sbSaveAllIngredients:', error.message, row);
+  }
+}
+
+async function sbAddIngredient(ing) {
+  const client = getClient();
+  const { data, error } = await client.from('ingredients').insert({
+    name: ing.name, unit: ing.unit, unit_cost: ing.unitCost,
+    supplier: ing.supplier || '', on_hand: ing.onHand || 0, reorder_point: ing.reorder || 0
+  }).select().single();
+  if (error) { console.error('sbAddIngredient:', error.message); return; }
+  ing.id = data.id; // backfill id onto in-memory object
+}
+
+async function sbDeleteIngredient(id) {
+  if (!id) return;
+  const client = getClient();
+  const { error } = await client.from('ingredients').delete().eq('id', id);
+  if (error) console.error('sbDeleteIngredient:', error.message);
+}
+
+async function sbSaveRecipe(r) {
+  if (!r || !r.id) return;
+  const client = getClient();
+  const { error } = await client.from('recipes').update({
+    dozens_per_batch: r.dz, labor_hours: r.labor,
+    retail_revenue: r.rev, packaging_cost: r.pack,
+    ingredient_cost: r.ing, margin: r.margin,
+    is_priority: r.star || false, archived: r.archived || false
+  }).eq('id', r.id);
+  if (error) console.error('sbSaveRecipe:', error.message);
+}
+
+async function sbAddRecipe(r) {
+  const client = getClient();
+  const { data, error } = await client.from('recipes').insert({
+    name: r.name, dozens_per_batch: r.dz, labor_hours: r.labor,
+    retail_revenue: r.rev, packaging_cost: r.pack,
+    ingredient_cost: r.ing || 0, margin: r.margin || 0,
+    is_priority: r.star || false, archived: false
+  }).select().single();
+  if (error) { console.error('sbAddRecipe:', error.message); return; }
+  r.id = data.id;
+}
+
+async function sbSaveRecipeIngredients(r) {
+  if (!r || !r.id) return;
+  const client = getClient();
+  // Delete existing links, re-insert all
+  await client.from('recipe_ingredients').delete().eq('recipe_id', r.id);
+  if (!r.ingredients || !r.ingredients.length) return;
+  const ingNameMap = {};
+  INGREDIENTS.forEach(i => { if (i.id) ingNameMap[i.name] = i.id; });
+  const rows = r.ingredients
+    .map((ing, idx) => ({
+      recipe_id: r.id,
+      ingredient_id: ingNameMap[ing.name],
+      amount: ing.amount,
+      sort_order: idx
+    }))
+    .filter(row => row.ingredient_id);
+  if (rows.length) {
+    const { error } = await client.from('recipe_ingredients').insert(rows);
+    if (error) console.error('sbSaveRecipeIngredients:', error.message);
+  }
+}
+
+async function sbAddOrder(order) {
+  const client = getClient();
+  const recipe = RECIPES.find((r, i) => i === order.recipeIdx);
+  const { data, error } = await client.from('orders').insert({
+    customer_id: order.custId,
+    recipe_id: recipe?.id || null,
+    qty_type: order.qtyType, quantity: order.qty,
+    case_size: order.caseSize, total_dozens: order.totalDz,
+    batches_needed: order.batchesNeeded, batches_scheduled: 0,
+    due_date: order.due, status: 'pending', notes: order.notes || ''
+  }).select().single();
+  if (error) { console.error('sbAddOrder:', error.message); return; }
+  order.id = data.id;
+}
+
+async function sbUpdateOrder(order) {
+  if (!order || !order.id) return;
+  const client = getClient();
+  const { error } = await client.from('orders').update({
+    batches_scheduled: order.batchesScheduled,
+    status: order.status
+  }).eq('id', order.id);
+  if (error) console.error('sbUpdateOrder:', error.message);
+}
+
+async function sbDeleteOrder(id) {
+  if (!id) return;
+  const client = getClient();
+  const { error } = await client.from('orders').delete().eq('id', id);
+  if (error) console.error('sbDeleteOrder:', error.message);
+}
+
+async function sbSaveCustomer(c) {
+  if (!c) return;
+  const client = getClient();
+  if (c.id && typeof c.id === 'number' && c.id > 0) {
+    const { error } = await client.from('customers').update({
+      name: c.name, phone: c.phone || '', email: c.email || '',
+      address: c.address || '', notes: c.notes || ''
+    }).eq('id', c.id);
+    if (error) console.error('sbSaveCustomer update:', error.message);
+  } else {
+    const { data, error } = await client.from('customers').insert({
+      name: c.name, phone: c.phone || '', email: c.email || '',
+      address: c.address || '', notes: c.notes || ''
+    }).select().single();
+    if (error) { console.error('sbSaveCustomer insert:', error.message); return; }
+    c.id = data.id;
+  }
+}
+
+async function sbSaveCustomerPricing(custId) {
+  const c = CUSTOMERS.find(c => c.id === custId);
+  if (!c || !c.pricing) return;
+  const client = getClient();
+  const rows = Object.entries(c.pricing).map(([ri, p]) => {
+    const recipe = RECIPES[parseInt(ri)];
+    if (!recipe || !recipe.id) return null;
+    return {
+      customer_id: custId, recipe_id: recipe.id,
+      pricing_type: p.pricingType || 'dozen',
+      price_per_dozen: p.pricePerDz || 0,
+      price_per_case: p.pricePerCase || 0,
+      case_size_dozens: p.caseSize || 0
+    };
+  }).filter(Boolean);
+  // Upsert all pricing rows
+  await client.from('customer_pricing').delete().eq('customer_id', custId);
+  if (rows.length) {
+    const { error } = await client.from('customer_pricing').insert(rows);
+    if (error) console.error('sbSaveCustomerPricing:', error.message);
+  }
+}
+
+async function sbDeleteCustomer(id) {
+  if (!id) return;
+  const client = getClient();
+  await client.from('customer_pricing').delete().eq('customer_id', id);
+  const { error } = await client.from('customers').delete().eq('id', id);
+  if (error) console.error('sbDeleteCustomer:', error.message);
+}
+
+async function sbSaveEmployee(emp) {
+  const client = getClient();
+  if (emp.sbId) {
+    const { error } = await client.from('employees').update({
+      name: emp.name, emp_type: emp.type, rate: emp.rate, color: emp.color
+    }).eq('id', emp.sbId);
+    if (error) console.error('sbSaveEmployee update:', error.message);
+  } else {
+    const { data, error } = await client.from('employees').insert({
+      name: emp.name, emp_type: emp.type, rate: emp.rate, color: emp.color
+    }).select().single();
+    if (error) { console.error('sbSaveEmployee insert:', error.message); return; }
+    emp.sbId = data.id;
+  }
+}
+
+async function sbDeleteEmployee(empId) {
+  const emp = EMPLOYEES.find(e => e.id === empId);
+  if (!emp || !emp.sbId) return;
+  const client = getClient();
+  const { error } = await client.from('employees').delete().eq('id', emp.sbId);
+  if (error) console.error('sbDeleteEmployee:', error.message);
+}
+
+async function sbSaveFinishedGoods(ri) {
+  const client = getClient();
+  const recipe = RECIPES[ri];
+  if (!recipe || !recipe.id) return;
+  const inv = FINISHED_INV[ri] || { batches: 0 };
+  const { error } = await client.from('finished_inventory').upsert({
+    recipe_id: recipe.id,
+    batches_on_hand: inv.batches || 0,
+    updated_at: new Date().toISOString()
+  }, { onConflict: 'recipe_id' });
+  if (error) console.error('sbSaveFinishedGoods:', error.message);
+}
+
 
 function loadFromStorage() {
   try {
@@ -2531,14 +2761,16 @@ function addWholesaleOrder() {
   const totalDz = type === 'cases' ? qty * caseSize : qty;
   const batchesNeeded = Math.ceil(totalDz / r.dz);
   const cust = CUSTOMERS.find(c => c.id == custId);
-  ORDERS.push({
+  const newOrder = {
     id: nextOrderId++, type: 'wholesale', custId: parseInt(custId),
     custName: cust ? cust.name : 'Unknown', recipeIdx: parseInt(ri),
     recipeName: r.name, qtyType: type, qty, caseSize,
     totalDz, batchesNeeded, batchesScheduled: 0,
     due, status: 'pending', notes: '',
     createdAt: new Date().toISOString().split('T')[0]
-  });
+  };
+  ORDERS.push(newOrder);
+  sbAddOrder(newOrder);
   hideAddOrderForm();
   renderWholesaleOrders();
   persistToStorage();
@@ -2641,6 +2873,7 @@ function adjustOrderScheduled(id, delta) {
   else if (order.status === 'complete') order.status = 'pending';
   renderWholesaleOrders();
   persistToStorage();
+  sbUpdateOrder(order);
 }
 function markOrderComplete(id) {
   const o = ORDERS.find(o => o.id === id);
@@ -2669,13 +2902,16 @@ function markOrderComplete(id) {
   updateOverviewInventoryMetrics();
   renderWholesaleOrders();
   persistToStorage();
+  sbUpdateOrder(o);
+  sbSaveFinishedGoods(ri);
 }
 function markOrderPending(id) {
   const o = ORDERS.find(o => o.id === id);
-  if (o) { o.status = 'pending'; renderWholesaleOrders(); persistToStorage(); }
+  if (o) { o.status = 'pending'; renderWholesaleOrders(); persistToStorage(); sbUpdateOrder(o); }
 }
 function deleteOrder(id) {
   if (!confirm('Remove this order?')) return;
+  sbDeleteOrder(id);
   ORDERS = ORDERS.filter(o => o.id !== id);
   renderWholesaleOrders();
   persistToStorage();
@@ -2816,6 +3052,7 @@ function saveNewCustomerCard() {
   // Sync in-memory array
   CUSTOMERS.splice(0, CUSTOMERS.length, ...custs);
   nextCustId = maxId + 2;
+  sbSaveCustomer(newCust);
 
   hideNewCustomerCard();
   buildCustomersPane();
@@ -3005,6 +3242,7 @@ function saveCustomerInfo(id) {
   c.email   = document.getElementById('ce-email-'+id).value.trim();
   c.address = document.getElementById('ce-address-'+id).value.trim();
   persistToStorage();
+  sbSaveCustomer(c);
   buildCustomersPane();
   populateOrderCustomerDropdown();
   showToast('Customer info saved');
@@ -3043,12 +3281,14 @@ function saveAllPricing(custId) {
     c.pricing[ri] = { pricePerDz: pdz, pricePerCase: pc, caseSize: cs, pricingType: pt };
   });
   persistToStorage();
+  sbSaveCustomerPricing(custId);
   showToast('Pricing saved for ' + c.name);
 }
 
 function deleteCustomerFull(id) {
   const c = CUSTOMERS.find(c => c.id === id);
   if (!confirm('Remove ' + c.name + ' and all their pricing?')) return;
+  sbDeleteCustomer(id);
   CUSTOMERS = CUSTOMERS.filter(c => c.id !== id);
   buildCustomersPane();
   persistToStorage();
@@ -3094,6 +3334,7 @@ function addToFinishedInventory(ri, batches, note) {
     source: 'schedule'
   });
   persistToStorage();
+  sbSaveFinishedGoods(ri);
   updateOverviewInventoryMetrics();
 }
 
@@ -3101,6 +3342,7 @@ function removeFromFinishedInventory(ri, batches) {
   if (!FINISHED_INV[ri]) return;
   FINISHED_INV[ri].batches = Math.max(0, FINISHED_INV[ri].batches - batches);
   persistToStorage();
+  sbSaveFinishedGoods(ri);
   updateOverviewInventoryMetrics();
 }
 
@@ -3150,10 +3392,16 @@ function adjustFinishedBatches(ri, delta) {
   renderFinishedTable();
   updateOverviewInventoryMetrics();
   persistToStorage();
+  sbSaveFinishedGoods(ri);
 }
 
 function clearFinishedInventory() {
   if (!confirm('Clear all finished goods inventory? This cannot be undone.')) return;
+  // Clear in Supabase
+  (async () => {
+    const client = getClient();
+    await client.from('finished_inventory').delete().neq('id', 0);
+  })();
   FINISHED_INV = {};
   renderFinishedTable();
   updateOverviewInventoryMetrics();
