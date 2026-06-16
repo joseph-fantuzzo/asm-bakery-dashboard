@@ -827,6 +827,22 @@ input[type=number] {
 
 
       <!-- Employee roster -->
+      <!-- QuickBooks Online Integration -->
+      <div class="card" style="margin-bottom:16px">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+          <div>
+            <div style="font-weight:600;font-size:14px;color:var(--brown)">QuickBooks Online</div>
+            <div style="font-size:12px;color:var(--brown-light);margin-top:2px">Auto-create invoices when wholesale orders are marked complete</div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span id="qbo-status-badge" class="badge b-warn">Not connected</span>
+            <button id="qbo-connect-btn" class="btn btn-sm btn-primary" onclick="startQBOAuth()">Connect to QuickBooks</button>
+            <button id="qbo-disconnect-btn" class="btn btn-sm" onclick="disconnectQBO()" style="display:none;color:var(--red);border-color:var(--red)">Disconnect</button>
+          </div>
+        </div>
+        <div id="qbo-info" style="display:none;margin-top:10px;font-size:12px;color:var(--brown-mid)"></div>
+      </div>
+
       <div class="collapsible-card" id="section-employees">
         <div class="collapsible-header" onclick="toggleSection('employees')" style="cursor:pointer">
           <div style="display:flex;align-items:center;gap:10px">
@@ -1328,6 +1344,24 @@ document.addEventListener('DOMContentLoaded', () => {
         // Check if we're returning from Shopify OAuth
         const params = new URLSearchParams(window.location.search);
         const fragment = new URLSearchParams(window.location.hash.slice(1));
+        const qboTokens = fragment.get('qbo_tokens');
+        if (qboTokens) {
+          try {
+            localStorage.setItem('qbo_tokens', decodeURIComponent(qboTokens));
+            history.replaceState({}, '', window.location.pathname);
+            updateQBOStatus();
+            showToast('QuickBooks connected ✓');
+            // Ping QBO to verify and show company name
+            const headers = qboHeaders();
+            if (headers) {
+              fetch('/api/qbo', { method: 'POST', headers, body: JSON.stringify({ action: 'ping' }) })
+                .then(r => r.json())
+                .then(d => {
+                  if (d.companyName) showToast('Connected to ' + d.companyName + ' (' + d.environment + ')');
+                }).catch(() => {});
+            }
+          } catch(e) { console.error('QBO token parse error:', e); }
+        }
         const shopifyToken = fragment.get('shopify_token');
         if (shopifyToken) {
           // Token passed via URL fragment from OAuth callback
@@ -2160,6 +2194,7 @@ const DEFAULTS = {
 };
 
 function buildSettings() {
+  updateQBOStatus();
   renderEmpList();
   renderIngList();
   buildRecipeTable();
@@ -3123,6 +3158,8 @@ function markOrderComplete(id) {
   persistToStorage();
   sbUpdateOrder(o);
   sbSaveFinishedGoods(ri);
+  // Auto-create QBO invoice if connected
+  if (qboConnected()) createQBOInvoice(o);
 }
 function markOrderPending(id) {
   const o = ORDERS.find(o => o.id === id);
@@ -3281,6 +3318,134 @@ function renderShopifyOrdersData(orders) {
   });
   tbl.appendChild(tbody);
   el.appendChild(tbl);
+}
+
+
+// ── QuickBooks Online Integration ─────────────────────────────────────────────
+
+function qboHeaders() {
+  const tokens = JSON.parse(localStorage.getItem('qbo_tokens') || 'null');
+  if (!tokens) return null;
+  return {
+    'Content-Type':   'application/json',
+    'X-QBO-Token':    tokens.access_token,
+    'X-QBO-Realm':    tokens.realm_id,
+    'X-QBO-Refresh':  tokens.refresh_token
+  };
+}
+
+function qboConnected() {
+  const tokens = JSON.parse(localStorage.getItem('qbo_tokens') || 'null');
+  if (!tokens) return false;
+  // Tokens expire in ~3600 seconds; refresh if within 5 min of expiry
+  const age = (Date.now() - (tokens.issued_at || 0)) / 1000;
+  return age < (tokens.expires_in || 3600) - 300;
+}
+
+function startQBOAuth() {
+  window.location.href = '/api/qbo-auth?install=1';
+}
+
+function disconnectQBO() {
+  localStorage.removeItem('qbo_tokens');
+  updateQBOStatus();
+  showToast('QuickBooks disconnected');
+}
+
+function updateQBOStatus() {
+  const badge      = document.getElementById('qbo-status-badge');
+  const connectBtn = document.getElementById('qbo-connect-btn');
+  const discBtn    = document.getElementById('qbo-disconnect-btn');
+  const info       = document.getElementById('qbo-info');
+  if (!badge) return;
+  const tokens = JSON.parse(localStorage.getItem('qbo_tokens') || 'null');
+  if (tokens?.access_token) {
+    badge.textContent = 'Connected'; badge.className = 'badge b-green';
+    if (connectBtn) connectBtn.style.display = 'none';
+    if (discBtn)    discBtn.style.display = '';
+    if (info) {
+      info.style.display = '';
+      info.textContent = `Connected to realm ${tokens.realm_id} · Invoices will be created automatically when orders are marked complete`;
+    }
+  } else {
+    badge.textContent = 'Not connected'; badge.className = 'badge b-warn';
+    if (connectBtn) connectBtn.style.display = '';
+    if (discBtn)    discBtn.style.display = 'none';
+    if (info) info.style.display = 'none';
+  }
+}
+
+async function refreshQBOToken() {
+  const tokens = JSON.parse(localStorage.getItem('qbo_tokens') || 'null');
+  if (!tokens?.refresh_token) return false;
+  try {
+    const r = await fetch('/api/qbo', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-QBO-Refresh': tokens.refresh_token },
+      body: JSON.stringify({ action: 'refresh' })
+    });
+    if (!r.ok) return false;
+    const data = await r.json();
+    tokens.access_token  = data.access_token;
+    tokens.refresh_token = data.refresh_token || tokens.refresh_token;
+    tokens.expires_in    = data.expires_in || 3600;
+    tokens.issued_at     = data.issued_at || Date.now();
+    localStorage.setItem('qbo_tokens', JSON.stringify(tokens));
+    return true;
+  } catch(e) {
+    console.error('QBO refresh failed:', e.message);
+    return false;
+  }
+}
+
+async function createQBOInvoice(order) {
+  if (!qboConnected()) {
+    // Try to refresh first
+    const refreshed = await refreshQBOToken();
+    if (!refreshed) {
+      showToast('QBO not connected — invoice not created');
+      return;
+    }
+  }
+  const headers = qboHeaders();
+  if (!headers) return;
+
+  const recipe   = RECIPES[order.recipeIdx];
+  const unitPrice = order.qtyType === 'case'
+    ? (order.pricePerCase || 0)
+    : (order.pricePerDz   || 0);
+
+  try {
+    const r = await fetch('/api/qbo', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        action:     'createInvoice',
+        custName:   order.custName,
+        recipeName: order.recipeName,
+        qty:        order.qtyType === 'case' ? order.qty : order.totalDz,
+        unitPrice,
+        dueDate:    order.due,
+        orderRef:   order.id
+      })
+    });
+    const data = await r.json();
+    if (r.status === 401 && data.refresh) {
+      const refreshed = await refreshQBOToken();
+      if (refreshed) return createQBOInvoice(order); // retry once
+      showToast('QBO session expired — please reconnect in Settings');
+      return;
+    }
+    if (!r.ok || !data.success) {
+      console.error('QBO invoice error:', data.error);
+      showToast('QBO invoice failed: ' + (data.error || 'unknown error'));
+      return;
+    }
+    showToast(`Invoice #${data.invoiceNo} created in QuickBooks ✓`);
+  } catch(e) {
+    console.error('QBO invoice error:', e.message);
+    showToast('QBO invoice failed: ' + e.message);
+  }
 }
 
 // ── Wholesale Customers Pane ──────────────────────────────────────────────────
