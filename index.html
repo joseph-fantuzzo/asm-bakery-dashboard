@@ -3262,7 +3262,9 @@ function renderShopifyOrdersData(orders) {
     const lineItems = o.lineItems?.edges || [];
     const items = lineItems.map(e => e.node.name + ' ×' + e.node.quantity).join(', ');
     const total = parseFloat(o.totalPriceSet?.shopMoney?.amount || 0).toFixed(2);
-    const customer = o.name || 'Shopify Order';
+    const customer = o.customer
+      ? (o.customer.firstName + ' ' + o.customer.lastName).trim() || o.customer.email || 'Guest'
+      : 'Guest';
     const date = formatDate((o.createdAt||'').split('T')[0]);
     const status = (o.displayFulfillmentStatus || 'UNFULFILLED').replace(/_/g,' ');
     const statusColor = status === 'UNFULFILLED' ? 'b-amber' : status === 'PARTIAL' ? 'b-warn' : 'b-green';
