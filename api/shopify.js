@@ -51,6 +51,7 @@ module.exports = async function handler(req, res) {
               displayFulfillmentStatus
               createdAt
               totalPriceSet { shopMoney { amount currencyCode } }
+              customer { firstName lastName email }
               lineItems(first: 50) {
                 edges {
                   node { id name quantity sku }
